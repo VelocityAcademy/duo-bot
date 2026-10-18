@@ -6,6 +6,11 @@ on:
     # GitHub often runs scheduled jobs a few minutes late.
     - cron: '*/5 17-22 * * *'
   workflow_dispatch: # lets you hit "Run workflow" to test it
+    inputs:
+      test_alert:
+        description: 'Send a test phone alert (uses an in-stock iPhone 17, does not touch saved state)'
+        type: boolean
+        default: false
 
 concurrency:
   group: duo-stock
@@ -25,7 +30,15 @@ jobs:
           key: duo-state-${{ github.run_id }}
           restore-keys: duo-state-
 
+      - name: Test phone alert
+        if: ${{ inputs.test_alert }}
+        shell: powershell
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: .\duo-stock-bot.ps1 -Once -Quiet -Label cloud-TEST -Part MG6M4X/A -ProbeParts MG6L4X/A -NtfyTopic $env:NTFY_TOPIC
+
       - name: Check Apple pickup stock
+        if: ${{ !inputs.test_alert }}
         shell: powershell
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
