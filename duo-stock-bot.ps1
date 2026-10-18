@@ -31,7 +31,9 @@ param(
     [switch]$Quiet,
     [string]$Label = 'PC',
     # Re-alert this often while a store stays in stock, in case the first ping was missed.
-    [int]$RemindMinutes = 15
+    [int]$RemindMinutes = 15,
+    # Also push a "still alive" status after this check, so silence can't be mistaken for "no stock".
+    [switch]$Heartbeat
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,6 +64,11 @@ function Show-Toast($title, $body) {
         $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show([Windows.UI.Notifications.ToastNotification]::new($xml))
     } catch { Write-Log "Toast failed: $($_.Exception.Message)" 'DarkYellow' }
+}
+
+function Get-MelbourneTime {
+    $t = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([datetime]::UtcNow, 'AUS Eastern Standard Time')
+    $t.ToString('h:mm tt ddd d MMM')
 }
 
 function Send-Push($title, $body, $priority) {
@@ -142,9 +149,15 @@ while ($true) {
             "$($stock[$_].Name): $(if ($stock[$_].Available) { 'IN STOCK' } else { 'no' })"
         }) -join ' | '
         Write-Log $summary
+        if ($Heartbeat) {
+            $inStock = @($Stores | Where-Object { $stock.ContainsKey($_) -and $stock[$_].Available })
+            $status = if ($inStock.Count) { "IN STOCK at $(($inStock | ForEach-Object { $stock[$_].Name }) -join ', ')" } else { 'No stock' }
+            Send-Push "Duo bot check-in: $status" "$summary. Checked $(Get-MelbourneTime). Next check-in in 6 hours." 'default'
+        }
     } catch {
         $failures++
         Write-Log "Check failed ($failures): $($_.Exception.Message)" 'Red'
+        if ($Heartbeat) { Send-Push 'Duo bot check-in: CHECK FAILED' "Couldn't reach Apple at $(Get-MelbourneTime): $($_.Exception.Message)" 'high' }
         # Warn once if Apple keeps refusing us, so a silent bot isn't mistaken for "no stock".
         if ($failures -eq 3) { Send-Push 'iPhone Duo bot is being blocked' "Last 3 checks failed: $($_.Exception.Message)" 'default' }
     }
