@@ -1,0 +1,38 @@
+name: iPhone Duo stock check
+
+on:
+  schedule:
+    # Every 5 min, 17:00-22:55 UTC = 4am-10am Melbourne during daylight saving (5am-11am from April).
+    # GitHub often runs scheduled jobs a few minutes late.
+    - cron: '*/5 17-22 * * *'
+  workflow_dispatch: # lets you hit "Run workflow" to test it
+
+concurrency:
+  group: duo-stock
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Remember which stores already had stock so you're pinged once, not every 5 minutes.
+      - uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: duo-state-${{ github.run_id }}
+          restore-keys: duo-state-
+
+      - name: Check Apple pickup stock
+        shell: powershell
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: .\duo-stock-bot.ps1 -Once -Quiet -Label cloud -StateFile state.json -NtfyTopic $env:NTFY_TOPIC
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state.json
+          key: duo-state-${{ github.run_id }}
