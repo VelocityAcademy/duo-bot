@@ -5,7 +5,7 @@
   Chadstone (R180), Doncaster (R342), Highpoint (R504), Southland (R343).
 
   Usage:
-    .\duo-stock-bot.ps1                      # poll every 60s, alert on restock
+    .\duo-stock-bot.ps1                      # poll every 60s, alert on restock, remind every 15 min while in stock
     .\duo-stock-bot.ps1 -Once                # single check, then exit
     .\duo-stock-bot.ps1 -NtfyTopic my-secret-topic   # also push to phone via ntfy.sh
     .\duo-stock-bot.ps1 -Part MG6M4X/A -ProbeParts MG6L4X/A -Once -NoBrowser
@@ -29,7 +29,9 @@ param(
     # Cloud mode: remember stock between separate -Once runs, skip beep/toast/browser.
     [string]$StateFile = '',
     [switch]$Quiet,
-    [string]$Label = 'PC'
+    [string]$Label = 'PC',
+    # Re-alert this often while a store stays in stock, in case the first ping was missed.
+    [int]$RemindMinutes = 15
 )
 
 $ErrorActionPreference = 'Stop'
@@ -89,11 +91,13 @@ function Get-Stock {
         foreach ($s in $data['body']['PickupMessage']['stores']) {
             $id = $s['storeNumber']
             if ($Stores -notcontains $id) { continue }
-            if (-not $result.ContainsKey($id)) { $result[$id] = @{ Name = $s['storeName']; Available = $false; Quote = 'Unavailable' } }
+            if (-not $result.ContainsKey($id)) { $result[$id] = @{ Name = $s['storeName']; Available = $false; Quote = 'Unavailable'; Title = $Part } }
             $pa = $s['partsAvailability']
             if ($pa -and $pa.ContainsKey($Part) -and $pa[$Part]['pickupDisplay'] -eq 'available') {
                 $result[$id].Available = $true
                 $result[$id].Quote = $pa[$Part]['pickupSearchQuote']
+                try { $result[$id].Title = $pa[$Part]['messageTypes']['regular']['storePickupProductTitle'] } catch {}
+                if (-not $result[$id].Title) { $result[$id].Title = $Part }
             }
         }
         Start-Sleep -Milliseconds (Get-Random -Minimum 500 -Maximum 1500)
@@ -102,11 +106,15 @@ function Get-Stock {
 }
 
 Write-Log "Watching $Part at $($Stores -join ', ') every ${IntervalSeconds}s. Ctrl+C to stop." 'Cyan'
-$wasAvailable = @{}
+# Store number -> UTC time of the last alert, for stores currently in stock.
+$lastAlert = @{}
 $failures = 0
 if ($StateFile -and (Test-Path $StateFile)) {
     $saved = $json.DeserializeObject((Get-Content $StateFile -Raw))
-    foreach ($id in $saved['available']) { $wasAvailable[$id] = $true }
+    if ($saved['alerted']) {
+        foreach ($id in $saved['alerted'].Keys) { $lastAlert[$id] = [datetime]::Parse($saved['alerted'][$id]).ToUniversalTime() }
+    }
+    foreach ($id in $saved['available']) { $lastAlert[$id] = [datetime]::UtcNow }  # older state format
     $failures = [int]$saved['fails']
 }
 
@@ -117,12 +125,18 @@ while ($true) {
         foreach ($id in $Stores) {
             if (-not $stock.ContainsKey($id)) { Write-Log "$id not in response (try another -Postcode)" 'DarkYellow'; continue }
             $s = $stock[$id]
-            if ($s.Available -and -not $wasAvailable[$id]) {
-                Send-Alert "iPhone Duo in stock: Apple $($s.Name)" "$Part - $($s.Quote). Order for pickup now."
-            } elseif (-not $s.Available -and $wasAvailable[$id]) {
-                Write-Log "$($s.Name): gone again" 'DarkYellow'
+            if ($s.Available) {
+                if (-not $lastAlert.ContainsKey($id)) {
+                    Send-Alert "In stock: $($s.Title) at Apple $($s.Name)" "$($s.Quote) ($Part). Order for pickup now."
+                    $lastAlert[$id] = [datetime]::UtcNow
+                } elseif (([datetime]::UtcNow - $lastAlert[$id]).TotalMinutes -ge $RemindMinutes - 0.5) {
+                    Send-Alert "Still in stock: $($s.Title) at Apple $($s.Name)" "$($s.Quote) ($Part). Reminder - order for pickup now."
+                    $lastAlert[$id] = [datetime]::UtcNow
+                }
+            } elseif ($lastAlert.ContainsKey($id)) {
+                Write-Log "$($s.Name): sold out again" 'DarkYellow'
+                $lastAlert.Remove($id)
             }
-            $wasAvailable[$id] = $s.Available
         }
         $summary = ($Stores | Where-Object { $stock.ContainsKey($_) } | ForEach-Object {
             "$($stock[$_].Name): $(if ($stock[$_].Available) { 'IN STOCK' } else { 'no' })"
@@ -136,8 +150,11 @@ while ($true) {
     }
 
     if ($StateFile) {
-        $state = New-Object 'System.Collections.Generic.Dictionary[string,object]'
-        $state['available'] = [string[]]@($wasAvailable.Keys | Where-Object { $wasAvailable[$_] })
+        # ::new() rather than New-Object, which wraps the value in a PSObject the serializer can't handle.
+        $state = [System.Collections.Generic.Dictionary[string,object]]::new()
+        $alerted = [System.Collections.Generic.Dictionary[string,string]]::new()
+        foreach ($id in $lastAlert.Keys) { $alerted[$id] = $lastAlert[$id].ToString('o') }
+        $state['alerted'] = $alerted
         $state['fails'] = [int]$failures
         $json.Serialize($state) |
             Set-Content -Path $StateFile -Encoding UTF8
