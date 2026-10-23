@@ -6,7 +6,8 @@ on:
     # GitHub often runs scheduled jobs a few minutes late.
     - cron: '*/5 17-22 * * *'
     # Check-in ping every 6 hours: 01/07/13/19 UTC = noon, 6pm, midnight, 6am Melbourne (daylight saving).
-    - cron: '0 1,7,13,19 * * *'
+    # Minute 7, not 0: GitHub drops more scheduled runs at the top of the hour.
+    - cron: '7 1,7,13,19 * * *'
   workflow_dispatch: # lets you hit "Run workflow" to test it
     inputs:
       check_in:
@@ -48,7 +49,7 @@ jobs:
         shell: powershell
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-          HEARTBEAT: ${{ github.event.schedule == '0 1,7,13,19 * * *' || inputs.check_in }}
+          HEARTBEAT: ${{ github.event.schedule == '7 1,7,13,19 * * *' || inputs.check_in }}
         run: .\duo-stock-bot.ps1 -Once -Quiet -Label cloud -StateFile state.json -NtfyTopic $env:NTFY_TOPIC -Heartbeat:($env:HEARTBEAT -eq 'true')
 
       - uses: actions/cache/save@v4
